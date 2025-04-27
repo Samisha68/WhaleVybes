@@ -1,5 +1,5 @@
 
-# 🐳 WhaleVybe — Your Solana Sidekick on Telegram 🚀
+# 🐳 WhaleVybe — Your Solana Sidekick on Telegram 🚀(t.me/whalevybesbot)
 
 Welcome to **WhaleVybe** — the coolest bot to hit the Solana seas! 🌊
 
