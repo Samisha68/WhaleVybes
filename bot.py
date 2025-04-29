@@ -9,6 +9,8 @@ import aiohttp
 import random
 import re
 import datetime
+import json
+from typing import Any
 
 # Load environment variables from .env file
 load_dotenv()
@@ -110,6 +112,14 @@ def my_wallets_keyboard(user_id):
     rows.append([InlineKeyboardButton(text="🏠 Back to Main Menu", callback_data="main_menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
+def show_more_keyboard(context_key):
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Show More", callback_data=f"show_more_{context_key}")],
+            [InlineKeyboardButton(text="Back", callback_data="token_menu")]
+        ]
+    )
+
 # --- Commands ---
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
@@ -198,23 +208,29 @@ async def process_my_wallets(callback_query: CallbackQuery):
     user_id = callback_query.from_user.id
     wallets = saved_wallets.get(user_id, [])
     await callback_query.answer()
-    
-    message_text = ""
-    if not wallets:
-        message_text = "📭 You haven't saved any wallets yet."
-    else:
-        lines = ["⭐ <b>Your Saved Wallets:</b>","Select a wallet to view options:"]
-        # No need to enumerate here as the keyboard handles indices
-        # for idx, w in enumerate(wallets, 1):
-        #     preview = w["address"][:5] + "..." + w["address"][-5:]
-        #     lines.append(f"<b>{idx}.</b> <b>{w['nickname']}</b> (<code>{preview}</code>)")
-        message_text = "\n".join(lines)
-        
-    await callback_query.message.edit_text(
-        message_text,
-        parse_mode="HTML",
-        reply_markup=my_wallets_keyboard(user_id) # Show the selection keyboard
-    )
+    try:
+        if not wallets:
+            message_text = "📭 You haven't saved any wallets yet."
+        else:
+            lines = ["⭐ <b>Your Saved Wallets:</b>", "<i>Select a wallet to view options:</i>"]
+            for idx, w in enumerate(wallets[:5], 1):
+                preview = w["address"][:5] + "..." + w["address"][-5:]
+                lines.append(f"<b>{idx}.</b> <b>{w['nickname']}</b> (<code>{preview}</code>)")
+            if len(wallets) > 5:
+                lines.append(f"<i>...and {len(wallets) - 5} more wallets</i>")
+            message_text = "\n".join(lines)
+        await callback_query.message.edit_text(
+            message_text,
+            parse_mode="HTML",
+            reply_markup=my_wallets_keyboard(user_id)
+        )
+    except Exception as e:
+        formatted_data = format_raw_data(wallets, max_chars=1000, max_items=3)
+        await callback_query.message.edit_text(
+            f"<b>⭐ Saved Wallets (Formatted):</b>\n<pre>{formatted_data}</pre>",
+            parse_mode="HTML",
+            reply_markup=my_wallets_keyboard(user_id)
+        )
 
 # NEW handler for when a user selects a wallet from the list
 @dp.callback_query(lambda c: re.match(r"select_wallet_\d+", c.data))
@@ -264,6 +280,7 @@ async def process_token_transfers_start(callback_query: CallbackQuery):
 # Instruction Names button press
 @dp.callback_query(lambda c: c.data == "instruction_names")
 async def process_instruction_names(callback_query: CallbackQuery):
+    user_id = callback_query.from_user.id
     await callback_query.answer()
     wait_msg = await callback_query.message.edit_text(random.choice(LOADING_MESSAGES), parse_mode="HTML")
     try:
@@ -281,14 +298,14 @@ async def process_instruction_names(callback_query: CallbackQuery):
                     lines.append(f"\n<i>...and {len(instruction_names) - 50} more instruction names</i>")
                 await wait_msg.edit_text("\n".join(lines), parse_mode="HTML", reply_markup=token_tools_keyboard())
             else:
-                # Show raw response if not a list
-                raw_data = str(instruction_names)
-                if len(raw_data) > 3000:
-                    raw_data = raw_data[:3000] + "...(truncated)"
+                # Paginate raw data display
+                user_states[user_id]["temp"]["raw_data_instruction_names"] = instruction_names
+                user_states[user_id]["temp"]["raw_data_page_instruction_names"] = 0
+                formatted_data = format_raw_data(instruction_names, max_chars=1000, max_items=3)
                 await wait_msg.edit_text(
-                    f"<b>📝 Instruction Names (Raw):</b>\n<pre>{raw_data}</pre>",
+                    f"<b>📝 Instruction Names (Formatted):</b>\n<pre>{formatted_data}</pre>",
                     parse_mode="HTML",
-                    reply_markup=token_tools_keyboard()
+                    reply_markup=show_more_keyboard("instruction_names")
                 )
         else:
             await wait_msg.edit_text(
@@ -303,6 +320,33 @@ async def process_instruction_names(callback_query: CallbackQuery):
             parse_mode="HTML",
             reply_markup=token_tools_keyboard()
         )
+
+@dp.callback_query(lambda c: c.data == "show_more_instruction_names")
+async def process_show_more_instruction_names(callback_query: CallbackQuery):
+    user_id = callback_query.from_user.id
+    temp = user_states[user_id]["temp"]
+    raw_data = temp.get("raw_data_instruction_names")
+    page = temp.get("raw_data_page_instruction_names", 0) + 1
+    temp["raw_data_page_instruction_names"] = page
+    # Increase limits for each page
+    max_chars = 1000 * (page + 1)
+    max_items = 3 * (page + 1)
+    if raw_data:
+        formatted_data = format_raw_data(raw_data, max_chars=max_chars, max_items=max_items)
+        # If still truncated, keep the button, else show only Back
+        reply_markup = show_more_keyboard("instruction_names") if (isinstance(raw_data, (list, dict)) and (len(str(raw_data)) > max_chars or (isinstance(raw_data, list) and len(raw_data) > max_items))) else token_tools_keyboard()
+        await callback_query.message.edit_text(
+            f"<b>📝 Instruction Names (More):</b>\n<pre>{formatted_data}</pre>",
+            parse_mode="HTML",
+            reply_markup=reply_markup
+        )
+    else:
+        await callback_query.message.edit_text(
+            "No more data to show.",
+            parse_mode="HTML",
+            reply_markup=token_tools_keyboard()
+        )
+    await callback_query.answer()
 
 # --- Demo Handler ---
 @dp.callback_query(lambda c: c.data == "demo")
@@ -331,7 +375,6 @@ async def process_demo(callback_query: CallbackQuery):
 # View Holdings (Triggered from wallet_options_keyboard)
 @dp.callback_query(lambda c: re.match(r"view_holdings_\d+", c.data))
 async def process_view_holdings_wallet_idx(callback_query: CallbackQuery):
-    print(f"[LOG] view_holdings_idx triggered: {callback_query.data}")
     user_id = callback_query.from_user.id
     match = re.match(r"view_holdings_(\d+)", callback_query.data)
     idx = int(match.group(1)) if match else None
@@ -356,31 +399,30 @@ async def process_view_holdings_wallet_idx(callback_query: CallbackQuery):
     wait_msg = await callback_query.message.edit_text(random.choice(LOADING_MESSAGES), parse_mode="HTML") # Edit previous msg
     
     try:
-        # NOTE: We removed fetch_wallet_holdings. This feature needs a suitable API call.
-        # Placeholder logic:
-        await asyncio.sleep(1) # Simulate API call
-        data = None # Replace with actual API call if available
-        print(f"[LOG] (Placeholder) Fetching holdings for {address}")
-        
-        if data: # Replace with actual data check
-            # ... Format holdings data ...
-            lines = [f"📊 Wallet Holdings: <b>{nickname}</b> (<code>{preview}</code>)"]
-            # Add formatted lines based on actual API response
+        data = await fetch_wallet_holdings(address)
+        if data and isinstance(data, list):
+            lines = [f"📊 <b>Wallet Holdings for {nickname}</b> (<code>{preview}</code>)\n"]
+            for i, token in enumerate(data[:5], 1):
+                symbol = token.get("symbol", "?")
+                amount = token.get("amount", "?")
+                value = token.get("value", "?")
+                mint = token.get("mintAddress", "?")
+                lines.append(f"<b>{i}.</b> <b>{symbol}</b> | <b>Amount:</b> {amount} | <b>Value:</b> ${value} | <b>Mint:</b> <code>{short_addr(mint)}</code>")
+            if len(data) > 5:
+                lines.append(f"<i>...and {len(data) - 5} more tokens</i>")
             await wait_msg.edit_text("\n".join(lines), parse_mode="HTML", reply_markup=wallet_options_keyboard(idx))
-        else:
+        elif data:
+            formatted_data = format_raw_data(data, max_chars=1000, max_items=3)
             await wait_msg.edit_text(
-                f"😕 Couldn't fetch holdings for <b>{nickname}</b> (<code>{preview}</code>).\n<i>(Note: Holdings API endpoint is not currently integrated)</i>", 
-                parse_mode="HTML", 
-                reply_markup=wallet_options_keyboard(idx) # Return to options for this wallet
+                f"<b>📊 Wallet Holdings (Formatted):</b>\n<pre>{formatted_data}</pre>",
+                parse_mode="HTML",
+                reply_markup=wallet_options_keyboard(idx)
             )
-            
+        else:
+            await wait_msg.edit_text(f"😕 Couldn't fetch holdings for <b>{nickname}</b> (<code>{preview}</code>).", parse_mode="HTML", reply_markup=wallet_options_keyboard(idx))
     except Exception as e:
-        print(f"[LOG] Exception in view_holdings handler: {e}")
-        await wait_msg.edit_text(
-            f"🙁 Error fetching holdings for <b>{nickname}</b>: {str(e)}", 
-            parse_mode="HTML", 
-            reply_markup=wallet_options_keyboard(idx)
-        )
+        formatted_error = format_raw_data({"error": str(e)}, max_chars=1000)
+        await wait_msg.edit_text(f"🙁 Error fetching holdings for <b>{nickname}</b>:\n<pre>{formatted_error}</pre>", parse_mode="HTML", reply_markup=wallet_options_keyboard(idx))
 
 # Recent Transfers (Triggered from wallet_options_keyboard)
 @dp.callback_query(lambda c: re.match(r"recent_transfers_\d+", c.data))
@@ -440,12 +482,9 @@ async def process_recent_transfers_wallet_idx(callback_query: CallbackQuery):
             
             await wait_msg.edit_text("\n".join(lines), parse_mode="HTML", reply_markup=wallet_options_keyboard(idx))
         elif transfers:
-            # Show raw data if any data is returned but not in expected format
-            raw_data = str(transfers)
-            if len(raw_data) > 3000:
-                raw_data = raw_data[:3000] + "...(truncated)"
+            formatted_data = format_raw_data(transfers, max_chars=1000, max_items=3)
             await wait_msg.edit_text(
-                f"<b>🔄 Recent Transfers (Raw):</b>\n<pre>{raw_data}</pre>",
+                f"<b>🔄 Recent Transfers (Formatted):</b>\n<pre>{formatted_data}</pre>",
                 parse_mode="HTML",
                 reply_markup=wallet_options_keyboard(idx)
             )
@@ -457,9 +496,9 @@ async def process_recent_transfers_wallet_idx(callback_query: CallbackQuery):
             )
 
     except Exception as e:
-        print(f"[LOG] Exception in recent_transfers_wallet_idx handler: {e}")
+        formatted_error = format_raw_data({"error": str(e)}, max_chars=1000)
         await wait_msg.edit_text(
-             f"🙁 Error fetching transfers for <b>{nickname}</b>: {str(e)}", 
+             f"🙁 Error fetching transfers for <b>{nickname}</b>:\n<pre>{formatted_error}</pre>", 
              parse_mode="HTML", 
              reply_markup=wallet_options_keyboard(idx)
         )
@@ -594,20 +633,12 @@ async def handle_user_input(message: Message):
         
         try:
             token_details = await fetch_token_details(mint_address)
-            print(f"[LOG] Token details response: {token_details}")
-            
             if token_details and isinstance(token_details, dict) and not token_details.get("error") and token_details.get("name"):
-                # Format details nicely
-                lines = [f"<b>🪙 Token Details</b>"]
+                lines = [f"🪙 <b>Token Details</b>"]
                 lines.append(f"<b>Address:</b> <code>{mint_address}</code>")
-                
-                # Display main token information in a prominent section
-                if token_details.get("name") or token_details.get("symbol"):
-                    token_name = token_details.get("name", "Unknown")
-                    token_symbol = token_details.get("symbol", "")
-                    lines.append(f"<b>Token:</b> {token_name} {f'({token_symbol})' if token_symbol else ''}")
-                
-                # Group data into categories
+                token_name = token_details.get("name", "Unknown")
+                token_symbol = token_details.get("symbol", "")
+                lines.append(f"<b>Token:</b> {token_name} {f'({token_symbol})' if token_symbol else ''}")
                 supply_info = []
                 if "supply" in token_details:
                     supply_info.append(f"<b>Supply:</b> {token_details['supply']}")
@@ -616,7 +647,6 @@ async def handle_user_input(message: Message):
                 if supply_info:
                     lines.append("\n<b>📊 Supply Information:</b>")
                     lines.extend(supply_info)
-                
                 authority_info = []
                 if "mintAuthority" in token_details:
                     authority_info.append(f"<b>Mint Authority:</b> <code>{short_addr(token_details['mintAuthority'])}</code>")
@@ -625,7 +655,6 @@ async def handle_user_input(message: Message):
                 if authority_info:
                     lines.append("\n<b>🔑 Authority Information:</b>")
                     lines.extend(authority_info)
-                
                 metadata_info = []
                 if "isNft" in token_details:
                     is_nft = "Yes" if token_details["isNft"] else "No"
@@ -635,44 +664,31 @@ async def handle_user_input(message: Message):
                 if metadata_info:
                     lines.append("\n<b>ℹ️ Additional Metadata:</b>")
                     lines.extend(metadata_info)
-                
-                # Add other fields in a separate section
                 other_fields = []
-                excluded_fields = ["name", "symbol", "supply", "decimals", "freezeAuthority", 
-                                   "mintAuthority", "isNft", "lastUpdatedAt", "address"]
-                
+                excluded_fields = ["name", "symbol", "supply", "decimals", "freezeAuthority", "mintAuthority", "isNft", "lastUpdatedAt", "address"]
                 for key, value in token_details.items():
                     if key not in excluded_fields:
                         if isinstance(value, (str, int, float, bool)) and value:
                             other_fields.append(f"<b>{key.capitalize()}:</b> {value}")
-                
                 if other_fields:
                     lines.append("\n<b>📋 Other Information:</b>")
-                    lines.extend(other_fields[:5])  # Limit to 5 fields to avoid huge messages
+                    lines.extend(other_fields[:5])
                     if len(other_fields) > 5:
                         lines.append(f"<i>...and {len(other_fields) - 5} more fields</i>")
-                
                 await wait_msg.edit_text("\n".join(lines), parse_mode="HTML", reply_markup=token_tools_keyboard())
             elif token_details:
-                # Show raw data if any data is returned but not in expected format
-                raw_data = str(token_details)
-                if len(raw_data) > 3000:
-                    raw_data = raw_data[:3000] + "...(truncated)"
+                formatted_data = format_raw_data(token_details, max_chars=1000, max_items=3)
                 await wait_msg.edit_text(
-                    f"<b>🪙 Token Details (Raw):</b>\n<pre>{raw_data}</pre>",
+                    f"<b>🪙 Token Details (Formatted):</b>\n<pre>{formatted_data}</pre>",
                     parse_mode="HTML",
                     reply_markup=token_tools_keyboard()
                 )
             else:
-                await wait_msg.edit_text(
-                    "😕 I couldn't find any details for this token. The token may not exist or hasn't been indexed yet.",
-                    parse_mode="HTML",
-                    reply_markup=token_tools_keyboard()
-                )
+                await wait_msg.edit_text("😕 I couldn't find any details for this token. The token may not exist or hasn't been indexed yet.", parse_mode="HTML", reply_markup=token_tools_keyboard())
         except Exception as e:
-            print(f"[LOG] Exception in token details handler: {e}")
+            formatted_error = format_raw_data({"error": str(e)}, max_chars=1000)
             await wait_msg.edit_text(
-                f"🙁 I'm sorry, but I encountered an error while fetching token details:\n\n<i>{str(e)}</i>",
+                f"🙁 Error fetching token details:\n<pre>{formatted_error}</pre>",
                 parse_mode="HTML",
                 reply_markup=token_tools_keyboard()
             )
@@ -695,29 +711,26 @@ async def handle_user_input(message: Message):
         
         try:
             transfers = await fetch_token_transfers(address)
-            print(f"[LOG] Token transfers response: {transfers}")
-            
-            if transfers and isinstance(transfers, list) and transfers:
-                # Format transfers nicely
+            if isinstance(transfers, dict) and "transfers" in transfers:
+                transfers_list = transfers["transfers"]
+            else:
+                transfers_list = transfers if isinstance(transfers, list) else []
+
+            if transfers_list:
                 lines = [f"🔄 <b>Recent Token Transfers</b>"]
                 lines.append(f"<b>Address:</b> <code>{address}</code>")
-                lines.append("") # Empty line for spacing
-                
-                for i, t in enumerate(transfers[:5], 1):  # Show first 5 transfers
+                lines.append("")
+                for i, t in enumerate(transfers_list[:5], 1):
                     mint = t.get("mintAddress", "Unknown Token")
                     amount = t.get("amount", "?")
                     sender = t.get("senderAddress", "?")
                     receiver = t.get("receiverAddress", "?")
                     time = t.get("blockTime", "?")
                     instruction = t.get("instructionName", "Transfer")
-                    
-                    # Try to format time if it's a timestamp
                     try:
                         formatted_time = format_time(time) if isinstance(time, (int, float)) else time
                     except:
                         formatted_time = time
-                    
-                    # Create a block for each transfer
                     lines.append(f"<b>📤 Transfer #{i}</b>")
                     lines.append(f"<b>Token:</b> <code>{short_addr(mint)}</code>")
                     lines.append(f"<b>Amount:</b> {amount}")
@@ -726,32 +739,23 @@ async def handle_user_input(message: Message):
                     lines.append(f"<b>Time:</b> {formatted_time}")
                     if instruction and instruction != "Transfer":
                         lines.append(f"<b>Type:</b> {instruction}")
-                    lines.append("") # Empty line between transfers
-                
-                if len(transfers) > 5:
-                    lines.append(f"<i>...and {len(transfers) - 5} more transfers</i>")
-                
+                    lines.append("")
+                if len(transfers_list) > 5:
+                    lines.append(f"<i>...and {len(transfers_list) - 5} more transfers</i>")
                 await wait_msg.edit_text("\n".join(lines), parse_mode="HTML", reply_markup=token_tools_keyboard())
             elif transfers:
-                # Show raw data if any data is returned but not in expected format
-                raw_data = str(transfers)
-                if len(raw_data) > 3000:
-                    raw_data = raw_data[:3000] + "...(truncated)"
+                formatted_data = format_raw_data(transfers, max_chars=1000, max_items=3)
                 await wait_msg.edit_text(
-                    f"<b>🔄 Token Transfers (Raw):</b>\n<pre>{raw_data}</pre>",
+                    f"<b>🔄 Token Transfers (Formatted):</b>\n<pre>{formatted_data}</pre>",
                     parse_mode="HTML",
                     reply_markup=token_tools_keyboard()
                 )
             else:
-                await wait_msg.edit_text(
-                    "😕 I couldn't find any transfers for this address. The address may not have any recorded transfers or hasn't been indexed yet.",
-                    parse_mode="HTML",
-                    reply_markup=token_tools_keyboard()
-                )
+                await wait_msg.edit_text("😕 I couldn't find any transfers for this address. The address may not have any recorded transfers or hasn't been indexed yet.", parse_mode="HTML", reply_markup=token_tools_keyboard())
         except Exception as e:
-            print(f"[LOG] Exception in token transfers handler: {e}")
+            formatted_error = format_raw_data({"error": str(e)}, max_chars=1000)
             await wait_msg.edit_text(
-                f"🙁 I'm sorry, but I encountered an error while fetching token transfers:\n\n<i>{str(e)}</i>",
+                f"🙁 Error fetching token transfers:\n<pre>{formatted_error}</pre>",
                 parse_mode="HTML",
                 reply_markup=token_tools_keyboard()
             )
@@ -1011,6 +1015,59 @@ def format_time(ts):
     except Exception:
         return str(ts)
 
+# --- New: Utility to format raw API data for Telegram display ---
+def format_raw_data(data: Any, max_chars: int = 1000, max_items: int = 3) -> str:
+    """
+    Format raw API data for display in Telegram chat.
+    Args:
+        data: The raw data (dict, list, str, etc.) from the API.
+        max_chars: Maximum number of characters to display.
+        max_items: Maximum number of items to show if data is a list.
+    Returns:
+        A formatted string suitable for Telegram.
+    """
+    try:
+        if isinstance(data, str):
+            if len(data) > max_chars:
+                return f"{data[:max_chars]}...(truncated)"
+            return data
+        if isinstance(data, list):
+            if not data:
+                return "Empty list"
+            lines = [f"List with {len(data)} items (showing up to {max_items}):"]
+            for i, item in enumerate(data[:max_items], 1):
+                formatted_item = format_raw_data(item, max_chars=200, max_items=2)
+                lines.append(f"{i}. {formatted_item}")
+            if len(data) > max_items:
+                lines.append(f"...and {len(data) - max_items} more items")
+            return "\n".join(lines)
+        if isinstance(data, dict):
+            lines = ["Dictionary data:"]
+            priority_fields = ['name', 'symbol', 'address', 'mintAddress', 'amount', 'value', 'error']
+            shown_fields = 0
+            for key in priority_fields:
+                if key in data and shown_fields < 5:
+                    value = data[key]
+                    if isinstance(value, (dict, list)):
+                        value = format_raw_data(value, max_chars=200, max_items=2)
+                    lines.append(f" • {key.capitalize()}: {value}")
+                    shown_fields += 1
+            for key, value in data.items():
+                if key not in priority_fields and shown_fields < 5:
+                    if isinstance(value, (dict, list)):
+                        value = format_raw_data(value, max_chars=200, max_items=2)
+                    lines.append(f" • {key.capitalize()}: {value}")
+                    shown_fields += 1
+            if len(data) > shown_fields:
+                lines.append(f"...and {len(data) - shown_fields} more fields")
+            return "\n".join(lines)
+        json_str = json.dumps(data, indent=2)
+        if len(json_str) > max_chars:
+            json_str = json_str[:max_chars] + "...(truncated)"
+        return json_str
+    except Exception as e:
+        return f"Error formatting data: {str(e)}"
+
 # --- Main Execution ---
 async def main():
     print("Starting WhaleVybe polling...") # Updated name
@@ -1022,11 +1079,17 @@ if __name__ == "__main__":
 
 @dp.callback_query(lambda c: c.data == "end_chat")
 async def process_end_chat(callback_query: CallbackQuery):
+    print("[DEBUG] process_end_chat handler triggered")
     user_id = callback_query.from_user.id
     user_states[user_id] = {"step": "idle", "temp": {}} # Clear state
     await callback_query.answer("Ending chat...")
     await callback_query.message.edit_text(
-        "👋 Goodbye! We'll be here, excited for your next visit. Come back anytime to explore more with WhaleVybe!\n\nUse /start to begin a new session.",
+        "<b>👋 Thank you for vybing with WhaleVybe!</b>\n\n"
+        "We hope you found what you needed and enjoyed exploring Solana with us.\n\n"
+        "<i>Remember, the blockchain never sleeps—and neither do we!</i>\n\n"
+        "Come back anytime to track wallets, check tokens, or just to say hi.\n\n"
+        "<b>✨ Stay curious. Stay secure. Stay vybing!</b>\n\n"
+        "Use /start to begin a new session.",
         parse_mode="HTML",
         reply_markup=None # Remove the keyboard
     ) 
